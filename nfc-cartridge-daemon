@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""
+NFC Cartridge Reader Daemon for Bazzite Gaming Mode
+=====================================================
+Monitors an Arduino Leonardo (HID keyboard) NFC reader,
+detects Super+Shift+D trigger, captures the typed command,
+and executes it directly — no rofi needed.
+
+Works in Gamescope/Steam Gaming Mode where custom shortcuts
+aren't available.
+"""
+
+import evdev
+from evdev import ecodes, InputDevice, list_devices
+import logging
+import subprocess
+import os
+import sys
+import time
+import signal
+
+# ─── CONFIGURATION ──────────────────────────────────────────
+DEVICE_VENDOR     = 0x2341
+DEVICE_PRODUCT    = 0x8036
+RETRY_INTERVAL    = 3
+# ────────────────────────────────────────────────────────────
+
+LOG_FILE = "/tmp/nfc-cartridge.log"
+
+TRIGGER_SET = {ecodes.KEY_LEFTMETA, ecodes.KEY_LEFTSHIFT, ecodes.KEY_D}
+SHIFT_KEYS  = {ecodes.KEY_LEFTSHIFT, ecodes.KEY_RIGHTSHIFT}
+KEY_ENTER     = ecodes.KEY_ENTER
+KEY_BACKSPACE = ecodes.KEY_BACKSPACE
+
+IDLE      = 0
+CAPTURING = 2
+
+# Character maps (US layout)
+BASE = {
+    ecodes.KEY_1: '1', ecodes.KEY_2: '2', ecodes.KEY_3: '3',
+    ecodes.KEY_4: '4', ecodes.KEY_5: '5', ecodes.KEY_6: '6',
+    ecodes.KEY_7: '7', ecodes.KEY_8: '8', ecodes.KEY_9: '9', ecodes.KEY_0: '0',
+    ecodes.KEY_MINUS: '-', ecodes.KEY_EQUAL: '=',
+    ecodes.KEY_Q: 'q', ecodes.KEY_W: 'w', ecodes.KEY_E: 'e',
+    ecodes.KEY_R: 'r', ecodes.KEY_T: 't', ecodes.KEY_Y: 'y',
+    ecodes.KEY_U: 'u', ecodes.KEY_I: 'i', ecodes.KEY_O: 'o', ecodes.KEY_P: 'p',
+    ecodes.KEY_LEFTBRACE: '[', ecodes.KEY_RIGHTBRACE: ']',
+    ecodes.KEY_A: 'a', ecodes.KEY_S: 's', ecodes.KEY_D: 'd',
+    ecodes.KEY_F: 'f', ecodes.KEY_G: 'g', ecodes.KEY_H: 'h',
+    ecodes.KEY_J: 'j', ecodes.KEY_K: 'k', ecodes.KEY_L: 'l',
+    ecodes.KEY_SEMICOLON: ';', ecodes.KEY_APOSTROPHE: "'", ecodes.KEY_GRAVE: '`',
+    ecodes.KEY_BACKSLASH: '\\\\',
+    ecodes.KEY_Z: 'z', ecodes.KEY_X: 'x', ecodes.KEY_C: 'c',
+    ecodes.KEY_V: 'v', ecodes.KEY_B: 'b', ecodes.KEY_N: 'n', ecodes.KEY_M: 'm',
+    ecodes.KEY_COMMA: ',', ecodes.KEY_DOT: '.', ecodes.KEY_SLASH: '/',
+    ecodes.KEY_SPACE: ' ',
+}
+
+SHIFT = {
+    ecodes.KEY_1: '!', ecodes.KEY_2: '@', ecodes.KEY_3: '#',
+    ecodes.KEY_4: '$', ecodes.KEY_5: '%', ecodes.KEY_6: '^',
+    ecodes.KEY_7: '&', ecodes.KEY_8: '*', ecodes.KEY_9: '(', ecodes.KEY_0: ')',
+    ecodes.KEY_MINUS: '_', ecodes.KEY_EQUAL: '+',
+    ecodes.KEY_Q: 'Q', ecodes.KEY_W: 'W', ecodes.KEY_E: 'E',
+    ecodes.KEY_R: 'R', ecodes.KEY_T: 'T', ecodes.KEY_Y: 'Y',
+    ecodes.KEY_U: 'U', ecodes.KEY_I: 'I', ecodes.KEY_O: 'O', ecodes.KEY_P: 'P',
+    ecodes.KEY_LEFTBRACE: '{', ecodes.KEY_RIGHTBRACE: '}',
+    ecodes.KEY_A: 'A', ecodes.KEY_S: 'S', ecodes.KEY_D: 'D',
+    ecodes.KEY_F: 'F', ecodes.KEY_G: 'G', ecodes.KEY_H: 'H',
+    ecodes.KEY_J: 'J', ecodes.KEY_K: 'K', ecodes.KEY_L: 'L',
+    ecodes.KEY_SEMICOLON: ':', ecodes.KEY_APOSTROPHE: '"', ecodes.KEY_GRAVE: '~',
+    ecodes.KEY_BACKSLASH: '|',
+    ecodes.KEY_Z: 'Z', ecodes.KEY_X: 'X', ecodes.KEY_C: 'C',
+    ecodes.KEY_V: 'V', ecodes.KEY_B: 'B', ecodes.KEY_N: 'N', ecodes.KEY_M: 'M',
+    ecodes.KEY_COMMA: '<', ecodes.KEY_DOT: '>', ecodes.KEY_SLASH: '?',
+    ecodes.KEY_SPACE: ' ',
+}
+
+
+def setup_logging():
+    logging.basicConfig(
+        filename=LOG_FILE, level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
+    con = logging.StreamHandler()
+    con.setLevel(logging.INFO)
+    con.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+    logging.getLogger('').addHandler(con)
+
+
+def find_device():
+    for path in list_devices():
+        dev = InputDevice(path)
+        if dev.info.vendor == DEVICE_VENDOR and dev.info.product == DEVICE_PRODUCT:
+            return dev
+    logging.error("NFC reader not found. Available keyboard-like devices:")
+    for path in list_devices():
+        dev = InputDevice(path)
+        caps = dev.capabilities()
+        if ecodes.EV_KEY in caps:
+            k = caps[ecodes.EV_KEY]
+            if ecodes.KEY_A in k and ecodes.KEY_ENTER in k:
+                logging.error(f"  {dev.path:25s} {dev.name:40s} VID={dev.info.vendor:04x}:PID={dev.info.product:04x}")
+    return None
+
+
+def char_for(code, shifted):
+    return SHIFT.get(code) if shifted else BASE.get(code)
+
+
+def serve(device):
+    device.grab()
+    logging.info(f"Device grabbed ({device.path}). Waiting for trigger...")
+
+    state = IDLE
+    buffer = ""
+    held = set()
+    shifted = False
+
+    try:
+        for event in device.read_loop():
+            if event.type != ecodes.EV_KEY or event.value == 2:
+                continue
+
+            pressed = event.value == 1
+            code = event.code
+
+            if pressed:
+                held.add(code)
+                if code in SHIFT_KEYS:
+                    shifted = True
+                    continue
+            else:
+                held.discard(code)
+                if code in SHIFT_KEYS:
+                    shifted = bool(held & SHIFT_KEYS)
+                continue
+
+            if state == IDLE:
+                if TRIGGER_SET.issubset(held):
+                    logging.info("Trigger detected (Super+Shift+D)")
+                    state = CAPTURING
+                    buffer = ""
+
+            elif state == CAPTURING:
+                if code == KEY_ENTER:
+                    logging.info(f"Executing: {buffer}")
+                    subprocess.Popen(
+                        ["bash", "-c", buffer],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                    buffer = ""
+                    state = IDLE
+                elif code == KEY_BACKSPACE:
+                    buffer = buffer[:-1]
+                else:
+                    ch = char_for(code, shifted)
+                    if ch:
+                        buffer += ch
+
+    finally:
+        try:
+            device.ungrab()
+        except Exception:
+            pass
+
+
+def main():
+    setup_logging()
+    logging.info("NFC Cartridge Daemon started")
+
+    while True:
+        device = find_device()
+        if device:
+            logging.info(f"Connected: {device.name} at {device.path}")
+            try:
+                serve(device)
+            except OSError as e:
+                logging.error(f"Device lost: {e}")
+            except (KeyboardInterrupt, SystemExit):
+                break
+        else:
+            logging.info(f"Reader not found, retrying in {RETRY_INTERVAL}s...")
+            try:
+                time.sleep(RETRY_INTERVAL)
+            except KeyboardInterrupt:
+                break
+
+    logging.info("Daemon stopped")
+
+
+if __name__ == "__main__":
+    main()
