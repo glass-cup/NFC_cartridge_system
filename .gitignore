@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*~
+.DS_Store
+Thumbs.db
+*.egg-info/
+dist/
+build/
+.vscode/
+.idea/
+*.iml

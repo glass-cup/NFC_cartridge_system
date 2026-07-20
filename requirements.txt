@@ -1,0 +1,2 @@
+# Linux daemon (install via apt: sudo apt install python3-evdev)
+evdev>=1.4.0
