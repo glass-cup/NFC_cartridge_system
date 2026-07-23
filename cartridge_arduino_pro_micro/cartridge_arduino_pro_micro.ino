@@ -5,6 +5,7 @@
 #define PN532_SS 9
 #define BUTTON 2
 #define LED 10
+#define NFC_TIMEOUT_MS 500
 
 Adafruit_PN532 nfc(PN532_SS);
 
@@ -30,7 +31,7 @@ bool readTag(String &outText) {
   uint8_t uid[7];
   uint8_t uidLength;
 
-  if (!nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength))
+  if (!nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, NFC_TIMEOUT_MS))
     return false;
 
   uint8_t data[128];
@@ -120,7 +121,7 @@ void loop() {
       slowPrint(currentCommand.c_str(), 35);
       delay(50);
       BootKeyboard.write(KEY_RETURN);
-    }
+    } else blink(1);
 
     while (digitalRead(BUTTON) == LOW)
       delay(20);
