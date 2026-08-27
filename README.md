@@ -55,6 +55,8 @@ Navigate to the `linux_daemon` directory and run the `install.sh` script. (syste
 ## How to create a cartridge:
 Install NFC Tools or other such app that allows you to save plain text data to an NFC tag. Create a text record containing the command you want the tag to execute, and write the data to the tag.
 
+## Usage warning
+after a while of having the reader plugged in, it seems like the microcontroller has begun to degrade, running setup() a few seconds after the initial startup and not working properly. i will work on adding a sleep mode after a few seconds of idle. until then, unplug the reader when not in use for longevity
 
 ### Note:
 I do not plan to update this regularly. I allow anyone to update, remake, or repost this as long as you give proper credit. Even if you don't, I won't try to do anything about it.
