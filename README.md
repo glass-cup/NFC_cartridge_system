@@ -50,7 +50,7 @@ Windows (10+)
 Navigate to the `windows_daemon` directory and run the `install.bat` script. Once that's done, open the newly installed Microsoft PowerToys app at least once and run the install script one more time to apply the correct config.
 
 ### Linux:
-Navigate to the `linux_daemon` directory and run the `install.sh` script.
+Navigate to the `linux_daemon` directory and run the `install.sh` script. (systemd only)
 
 ## How to create a cartridge:
 Install NFC Tools or other such app that allows you to save plain text data to an NFC tag. Create a text record containing the command you want the tag to execute, and write the data to the tag.
